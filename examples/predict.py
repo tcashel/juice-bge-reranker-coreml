@@ -9,9 +9,11 @@ score. Use this to smoke-test a freshly converted or freshly pulled artifact.
 Requires macOS — `coremltools.models.MLModel` only loads on Apple platforms.
 
 Usage:
-    pixi run python examples/predict.py                                # uses build/bge-reranker-base-ane.mlpackage if present
-    pixi run python examples/predict.py --source hub --tag v0.1-ane    # downloads from HF
-    pixi run python examples/predict.py --source hub --tag v0.1-cpugpu # downloads cpugpu fallback
+    pixi run python examples/predict.py                                # local build/bge-reranker-base-ane.mlpackage
+    pixi run python examples/predict.py --variant cpugpu               # local cpuGpu artifact
+    pixi run python examples/predict.py --source hub                   # downloads v0.1-ane from HF
+    pixi run python examples/predict.py --source hub --variant cpugpu  # downloads v0.1-cpugpu fallback
+    pixi run python examples/predict.py --source hub --tag v0.2-ane    # explicit tag override
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from transformers import AutoTokenizer
 REPO_ID = "tcashel/bge-reranker-base-coreml"
 PAD_TOKEN_ID = 1  # XLM-R <pad>
 FIXED_BATCH = 20
+DEFAULT_TAG_PREFIX = "v0.1"  # rotated when a new release tag base ships
 
 # A short pair to smoke-test with; matches one of the fixtures in tests/test_numerical_equivalence.py.
 DEFAULT_QUERY = "what is the capital of france?"
@@ -37,8 +40,12 @@ DEFAULT_DOC = "Paris is the capital of France."
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--source", choices=("local", "hub"), default="local", help="Where to load the artifact from.")
-    p.add_argument("--variant", choices=("ane", "cpugpu"), default="ane")
-    p.add_argument("--tag", default="v0.1-ane", help="HF tag when --source=hub. Defaults to v0.1-ane.")
+    p.add_argument("--variant", choices=("ane", "cpugpu"), default="ane", help="Which Core ML variant to load.")
+    p.add_argument(
+        "--tag",
+        default=None,
+        help=f"HF tag when --source=hub. If unset, derived from --variant as '{DEFAULT_TAG_PREFIX}-<variant>'.",
+    )
     p.add_argument("--build-dir", type=Path, default=Path("build"), help="Local build dir when --source=local.")
     p.add_argument("--seq", type=int, default=128, choices=(128, 256, 512))
     p.add_argument("--query", default=DEFAULT_QUERY)
@@ -54,7 +61,11 @@ def resolve_artifact(args: argparse.Namespace) -> tuple[Path, Path]:
         if not mlpkg.exists():
             raise SystemExit(f"{mlpkg} does not exist. Run `pixi run convert` first, or pass --source hub.")
         return mlpkg, tok_dir
-    folder = Path(snapshot_download(repo_id=REPO_ID, revision=args.tag))
+    # Hub mode: --tag wins if explicit; otherwise derive from --variant so `--variant cpugpu`
+    # alone fetches the cpuGpu tag (the previous default tag silently overrode --variant).
+    tag = args.tag if args.tag else f"{DEFAULT_TAG_PREFIX}-{args.variant}"
+    print(f"loading {REPO_ID} @ {tag}")
+    folder = Path(snapshot_download(repo_id=REPO_ID, revision=tag))
     return folder / "model.mlpackage", folder
 
 
