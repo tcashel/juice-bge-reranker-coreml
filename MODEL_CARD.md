@@ -37,7 +37,7 @@ model-index:
 
 Core ML port of [`BAAI/bge-reranker-base`](https://huggingface.co/BAAI/bge-reranker-base) targeting the **Apple Neural Engine** on M-series Macs. Produced by the maintainer-side conversion tool at [github.com/tcashel/juice-bge-reranker-coreml](https://github.com/tcashel/juice-bge-reranker-coreml). Consumed by the Juice macOS app via [`swift-transformers`](https://github.com/huggingface/swift-transformers).
 
-This card **is the integration contract**. The Swift consumer relies on every section below; do not change a tensor name, shape, or token ID without bumping the variant tag and the `model_id` cache key on the consumer.
+This card **is the integration contract**. The Swift consumer relies on every section below; do not change a tensor name, shape, or token ID without bumping the variant tag (which the consumer pins in any per-model cache key, see below).
 
 ## Requirements
 
@@ -129,13 +129,13 @@ pixi run python examples/predict.py --source hub --tag v0.1-ane
 | `v{X}-ane` | `cpuAndNeuralEngine` | Headline build. The 12-layer encoder backbone (~924 ops: einsum, conv, softmax, layer_norm, gelu, transpose, residual add/mul) runs on the Apple Neural Engine. ~31 boundary ops (embedding gather over the 250k vocab, position-id arithmetic, mask construction, casts) dispatch to CPU; this is the Pareto frontier for XLM-RoBERTa-class models with very large vocabularies. Verified by `verify_ane.py`. M-series Macs only. |
 | `v{X}-cpugpu` | `cpuAndGPU` | Known-good fallback — the same ANE port converted with `compute_units=CPU_AND_GPU`. Used by Swift if the `-ane` build fails to load (e.g. driver or macOS version mismatch). |
 
-The Swift caller pins the tag in `Hub.snapshot(repo: "tcashel/bge-reranker-base-coreml", revision: "<tag>")` and embeds the same `<tag>` in the `model_id` cache key per Juice ADR 0006's `rerank_cache` table — rotating the tag invalidates the cache.
+The Swift caller pins the tag in `Hub.snapshot(repo: "tcashel/bge-reranker-base-coreml", revision: "<tag>")` and embeds the same `<tag>` in any consumer-side cache key tied to model identity — rotating the tag invalidates downstream caches.
 
 > **Repository layout.** This repo uses git **tags** (not subdirectories or sibling repos) to distinguish variants — `v{X}-ane` and `v{X}-cpugpu` point to different commits, each containing exactly one variant's files at the repo root (one `model.mlpackage`, one set of tokenizer files, one `provenance.json`). The `main` branch reflects whichever variant was published last, so consumers should always pin to a specific tag rather than reading from `main`. This layout optimizes for the Swift consumer: `HubApi.shared.snapshot(from:, revision: <tag>)` returns a flat ready-to-use directory.
 
 ## Architecture
 
-> **Correction vs ADR 0006:** ADR 0006 in the Juice repo describes this model as a "BERT cross-encoder." It is not. The upstream `config.json` declares `model_type: xlm-roberta`, `architectures: ["XLMRobertaForSequenceClassification"]`. The encoder *geometry* is BERT-like (12L/768H/12 heads, GELU, post-LN), but the tokenizer and special-token IDs are XLM-RoBERTa, not BERT. ADR 0006 should be patched in a follow-up Juice PR.
+> **Heads-up — XLM-RoBERTa, not BERT.** The encoder *geometry* is BERT-like (12L / 768H / 12 heads, GELU, post-LN), so a casual reader may pattern-match it as a BERT cross-encoder. It isn't. The upstream `config.json` declares `model_type: xlm-roberta`, `architectures: ["XLMRobertaForSequenceClassification"]`. The tokenizer and special-token IDs differ accordingly (see below); don't reach for `[CLS]`/`[SEP]`.
 
 - 12 transformer encoder layers, hidden 768, 12 attention heads, intermediate FFN 3072.
 - Single-segment model (`type_vocab_size = 1`).
@@ -166,7 +166,7 @@ The Swift caller pins the tag in `Hub.snapshot(repo: "tcashel/bge-reranker-base-
 <s> {query} </s></s> {document} </s>
 ```
 
-The doubled `</s></s>` separator is XLM-RoBERTa-specific (NOT the BERT `[SEP]` you might expect from ADR 0006's framing). `swift-transformers` does **not** expose `encode(text:textPair:)` for the Unigram path, so the Swift consumer must concatenate the template string itself before calling `encode(text:)`. Do not pre-tokenize and concatenate token IDs — let the tokenizer handle the special-token IDs.
+The doubled `</s></s>` separator is XLM-RoBERTa-specific (NOT the single BERT `[SEP]` you might expect from the encoder geometry). `swift-transformers` does **not** expose `encode(text:textPair:)` for the Unigram path, so the Swift consumer must concatenate the template string itself before calling `encode(text:)`. Do not pre-tokenize and concatenate token IDs — let the tokenizer handle the special-token IDs.
 
 ## Truncation policy
 
@@ -189,7 +189,7 @@ Both variants share the same input shape contract — they're the same architect
 
 There is **no `token_type_ids` input** — `type_vocab_size = 1`, so token-type embedding is constant and folded internally.
 
-Batch is fixed at 20 (matches the post-RRF top-20 candidate count from Juice's `docs/design/search.md`). Smaller actual batches must be padded with `<pad>` rows on the Swift side; the corresponding `attention_mask` rows should be all-zeros. The classification head still emits 20 logits — the consumer reads the first `actual_batch` of them and discards the rest.
+Batch is fixed at 20 (sized for the consumer's typical post-RRF candidate pool). Smaller actual batches must be padded with `<pad>` rows on the Swift side; the corresponding `attention_mask` rows should be all-zeros. The classification head still emits 20 logits — the consumer reads the first `actual_batch` of them and discards the rest.
 
 ## Output tensor
 
@@ -249,7 +249,7 @@ Measured by `bench.py` on the maintainer's machine (recorded under `<variant>_pr
 | 20 | 512 | 504.06 | 504.82 | 25.24 |
 <!-- /BENCH:cpugpu -->
 
-**Pass criterion (ANE variant):** `p95(batch=20, seq=256) < 200 ms` AND `per-pair p95 < 15 ms`. Matches Juice ADR 0006's reranker budget.
+**Pass criterion (ANE variant):** `p95(batch=20, seq=256) < 200 ms` AND `per-pair p95 < 15 ms`. Matches the consumer's reranker latency budget.
 
 ## Quality regression eval
 

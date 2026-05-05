@@ -9,7 +9,7 @@ Because the converted model has fixed batch = 20, smaller batch sweeps pad up to
 20 with `<pad>` tokens and report two figures:
   - p50 / p95: wall-clock per call (the latency the Swift caller observes).
   - per_pair_p95: p95 / actual_batch — the cost amortized across the candidates
-    that were not pad. This is the headline number ADR 0006 cares about.
+    that were not pad. This is the headline number the consumer's perf budget cares about.
 
 Pass criterion (ANE variant): p95(batch=20, seq=256) < 200 ms AND per_pair_p95 < 15 ms.
 
@@ -42,7 +42,7 @@ TIMED_ITERS = 100
 FIXED_BATCH = 20
 PAD_TOKEN_ID = 1  # XLM-R <pad>
 
-# ANE-variant pass criteria (matches ADR 0006 budget).
+# ANE-variant pass criteria (matches the consumer's perf budget).
 ANE_HEADLINE_BATCH = 20
 ANE_HEADLINE_SEQ = 256
 ANE_P95_BUDGET_MS = 200.0
