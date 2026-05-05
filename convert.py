@@ -1,12 +1,14 @@
 """
 End-to-end PyTorch -> Core ML conversion for `BAAI/bge-reranker-base`.
 
-Produces TWO `.mlpackage` artifacts in one run (Tier A shipping policy):
-  - `<output_dir>/bge-reranker-base-ane.mlpackage` — ANE-resident headline build.
-    Uses the vendored `ane_transformers` reference port (Conv2d projections,
-    BC1S layout, LayerNormANE) so every op lowers to the Apple Neural Engine.
-  - `<output_dir>/bge-reranker-base-cpugpu.mlpackage` — known-good fallback.
-    Vanilla `coremltools.convert` of the HF model with `compute_units=CPU_AND_GPU`.
+Produces TWO `.mlpackage` artifacts in one run (Tier A shipping policy). Both
+variants are converted from the same ANE-friendly port (Conv2d projections, BC1S
+layout, LayerNormANE) so they share architecture, weights, and (B, 1, 1, S) input
+shape — only the `compute_units` deployment hint differs:
+  - `<output_dir>/bge-reranker-base-ane.mlpackage` — `compute_units=CPU_AND_NE`.
+    Headline build; the 12-layer encoder backbone runs on the Apple Neural Engine.
+  - `<output_dir>/bge-reranker-base-cpugpu.mlpackage` — `compute_units=CPU_AND_GPU`.
+    Known-good fallback for when the ANE is unavailable (driver failures, Intel Macs).
 
 Also writes:
   - `<output_dir>/tokenizer/`            — tokenizer files for the Swift consumer.
@@ -116,27 +118,38 @@ def make_dummy_inputs(batch: int, seq: int, *, four_d: bool):
     return ids, mask
 
 
-def convert_ane_variant(
+def trace_ane_model(
     ane_model: ANEXLMRobertaForSequenceClassification,
+    *,
+    batch: int,
+    max_seq_len: int,
+) -> torch.jit.ScriptModule:
+    """torch.jit.trace the ANE port at (B, 1, 1, max_seq_len). Reused across variants."""
+    ane_model.eval()
+    input_ids, attn = make_dummy_inputs(batch, max_seq_len, four_d=True)
+    with torch.no_grad():
+        return torch.jit.trace(ane_model, (input_ids, attn))
+
+
+def convert_variant(
+    traced: torch.jit.ScriptModule,
     *,
     batch: int,
     seq_lengths: tuple[int, ...],
     max_seq_len: int,
     output_path: Path,
+    compute_units: ct.ComputeUnit,
 ) -> None:
-    """Trace + convert the ANE port. Writes <output_path>.mlpackage."""
-    ane_model.eval()
+    """Convert the traced ANE port to a .mlpackage with the requested compute units.
 
-    # Trace at the maximum shape (default of EnumeratedShapes).
-    input_ids, attn = make_dummy_inputs(batch, max_seq_len, four_d=True)
-    with torch.no_grad():
-        traced = torch.jit.trace(ane_model, (input_ids, attn))
-
+    Both variants share architecture, weights, and (B, 1, 1, S) input shape; only
+    the deployment hint differs. The cpuAndGPU build is the Tier-A safety net (used
+    when ANE driver/loader fails); verify_ane.py only gates the ANE variant.
+    """
     enumerated = ct.EnumeratedShapes(
         shapes=[(batch, 1, 1, s) for s in seq_lengths],
         default=(batch, 1, 1, max_seq_len),
     )
-
     mlmodel = ct.convert(
         traced,
         inputs=[
@@ -144,60 +157,10 @@ def convert_ane_variant(
             ct.TensorType(name="attention_mask", shape=enumerated, dtype=np.int32),
         ],
         outputs=[ct.TensorType(name="logit", dtype=np.float32)],
-        compute_units=ct.ComputeUnit.CPU_AND_NE,
+        compute_units=compute_units,
         compute_precision=ct.precision.FLOAT16,
         convert_to="mlprogram",
-        minimum_deployment_target=ct.target.macOS14,
-    )
-    mlmodel.save(str(output_path))
-
-
-def convert_cpugpu_variant(
-    hf_model,
-    *,
-    batch: int,
-    seq_lengths: tuple[int, ...],
-    max_seq_len: int,
-    output_path: Path,
-) -> None:
-    """Convert the vanilla HF model with cpuAndGPU compute units. (B, S) inputs, no ANE rewrite.
-
-    This is the safety-net build (Tier A shipping policy). It is expected to dispatch to
-    CPU/GPU; verify_ane.py explicitly skips it.
-    """
-    hf_model.eval()
-
-    # Wrap so we can trace just the logits forward and avoid HF's dataclass output.
-    class HFLogitsWrapper(torch.nn.Module):
-        def __init__(self, m):
-            super().__init__()
-            self.m = m
-
-        def forward(self, input_ids, attention_mask):
-            out = self.m(input_ids=input_ids.long(), attention_mask=attention_mask.long())
-            return out.logits
-
-    wrapper = HFLogitsWrapper(hf_model).eval()
-    input_ids = torch.randint(0, 250000, (batch, max_seq_len), dtype=torch.int32)
-    mask = torch.ones((batch, max_seq_len), dtype=torch.int32)
-    with torch.no_grad():
-        traced = torch.jit.trace(wrapper, (input_ids, mask))
-
-    enumerated = ct.EnumeratedShapes(
-        shapes=[(batch, s) for s in seq_lengths],
-        default=(batch, max_seq_len),
-    )
-    mlmodel = ct.convert(
-        traced,
-        inputs=[
-            ct.TensorType(name="input_ids", shape=enumerated, dtype=np.int32),
-            ct.TensorType(name="attention_mask", shape=enumerated, dtype=np.int32),
-        ],
-        outputs=[ct.TensorType(name="logit", dtype=np.float32)],
-        compute_units=ct.ComputeUnit.CPU_AND_GPU,
-        compute_precision=ct.precision.FLOAT16,
-        convert_to="mlprogram",
-        minimum_deployment_target=ct.target.macOS14,
+        minimum_deployment_target=ct.target.macOS15,
     )
     mlmodel.save(str(output_path))
 
@@ -214,7 +177,10 @@ def main() -> int:
 
     print(f"[2/5] Loading HF model + tokenizer at {sha[:12]}...")
     hf_config = AutoConfig.from_pretrained(args.source_model, revision=sha)
-    hf_model = AutoModelForSequenceClassification.from_pretrained(args.source_model, revision=sha, torch_dtype=torch.float32)
+    # `attn_implementation="eager"` avoids transformers 5.x's SDPA mask helper, which
+    # can't be torch.jit.traced cleanly (IndexError in sdpa_mask on a 0-dim q_length).
+    # Eager attention is mathematically identical to SDPA for inference.
+    hf_model = AutoModelForSequenceClassification.from_pretrained(args.source_model, revision=sha, dtype=torch.float32, attn_implementation="eager")
     hf_model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.source_model, revision=sha, use_fast=True)
     save_tokenizer(tokenizer, output_dir / "tokenizer")
@@ -230,53 +196,41 @@ def main() -> int:
         "batch_size": DEFAULT_BATCH,
     }
 
-    if "ane" in args.variants:
-        print("[3/5] Building ANE port + transferring weights...")
-        ane_model = build_ane_model(hf_model, hf_config)
-        if not args.skip_equivalence_check:
-            print("       checking HF <-> ANE numerical equivalence...")
-            ids, mask = make_dummy_inputs(2, 64, four_d=False)
-            assert_numerically_equivalent(hf_model, ane_model, ids.to(torch.long), mask.to(torch.long))
-            print("       OK")
-        ane_path = output_dir / "bge-reranker-base-ane.mlpackage"
-        if ane_path.exists():
-            shutil.rmtree(ane_path)
-        print(f"       converting -> {ane_path}")
-        convert_ane_variant(
-            ane_model,
-            batch=DEFAULT_BATCH,
-            seq_lengths=seq_lengths,
-            max_seq_len=args.max_seq_len,
-            output_path=ane_path,
-        )
-        Provenance.build(
-            source_repo=args.source_model,
-            source_revision=sha,
-            variant="ane",
-            artifact_filename=ane_path.name,
-            config=common_config,
-        ).write(output_dir / "ane_provenance.json")
+    print("[3/5] Building ANE port + transferring weights...")
+    ane_model = build_ane_model(hf_model, hf_config)
+    if not args.skip_equivalence_check:
+        print("       checking HF <-> ANE numerical equivalence...")
+        ids, mask = make_dummy_inputs(2, 64, four_d=False)
+        assert_numerically_equivalent(hf_model, ane_model, ids.to(torch.long), mask.to(torch.long))
+        print("       OK")
 
-    if "cpugpu" in args.variants:
-        print("[4/5] Converting cpuAndGPU fallback...")
-        cpu_path = output_dir / "bge-reranker-base-cpugpu.mlpackage"
-        if cpu_path.exists():
-            shutil.rmtree(cpu_path)
-        print(f"       converting -> {cpu_path}")
-        convert_cpugpu_variant(
-            hf_model,
+    print("[4/5] Tracing ANE port...")
+    traced = trace_ane_model(ane_model, batch=DEFAULT_BATCH, max_seq_len=args.max_seq_len)
+
+    variant_compute_units = {
+        "ane": ct.ComputeUnit.CPU_AND_NE,
+        "cpugpu": ct.ComputeUnit.CPU_AND_GPU,
+    }
+    for variant in args.variants:
+        artifact_path = output_dir / f"bge-reranker-base-{variant}.mlpackage"
+        if artifact_path.exists():
+            shutil.rmtree(artifact_path)
+        print(f"       converting -> {artifact_path} (compute_units={variant_compute_units[variant].name})")
+        convert_variant(
+            traced,
             batch=DEFAULT_BATCH,
             seq_lengths=seq_lengths,
             max_seq_len=args.max_seq_len,
-            output_path=cpu_path,
+            output_path=artifact_path,
+            compute_units=variant_compute_units[variant],
         )
         Provenance.build(
             source_repo=args.source_model,
             source_revision=sha,
-            variant="cpugpu",
-            artifact_filename=cpu_path.name,
+            variant=variant,
+            artifact_filename=artifact_path.name,
             config=common_config,
-        ).write(output_dir / "cpugpu_provenance.json")
+        ).write(output_dir / f"{variant}_provenance.json")
 
     print("[5/5] Done.")
     print(f"      Output dir: {output_dir.resolve()}")

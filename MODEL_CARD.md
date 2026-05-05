@@ -27,8 +27,8 @@ This card **is the integration contract**. The Swift consumer relies on every se
 
 | Tag | Compute units | Intended use |
 |---|---|---|
-| `v{X}-ane` | `cpuAndNeuralEngine` | Headline build. Every op verified ANE-resident by `verify_ane.py`. M-series Macs only. |
-| `v{X}-cpugpu` | `cpuAndGPU` | Known-good fallback. Used by Swift if the `-ane` build fails to load (e.g. driver or macOS version mismatch). |
+| `v{X}-ane` | `cpuAndNeuralEngine` | Headline build. The 12-layer encoder backbone (~924 ops: einsum, conv, softmax, layer_norm, gelu, transpose, residual add/mul) runs on the Apple Neural Engine. ~31 boundary ops (embedding gather over the 250k vocab, position-id arithmetic, mask construction, casts) dispatch to CPU; this is the Pareto frontier for XLM-RoBERTa-class models with very large vocabularies. Verified by `verify_ane.py`. M-series Macs only. |
+| `v{X}-cpugpu` | `cpuAndGPU` | Known-good fallback — the same ANE port converted with `compute_units=CPU_AND_GPU`. Used by Swift if the `-ane` build fails to load (e.g. driver or macOS version mismatch). |
 
 The Swift caller pins the tag in `Hub.snapshot(repo: "tcashel/bge-reranker-base-coreml", revision: "<tag>")` and embeds the same `<tag>` in the `model_id` cache key per Juice ADR 0006's `rerank_cache` table — rotating the tag invalidates the cache.
 
@@ -79,10 +79,12 @@ If `max_doc_tokens <= 0`, the query alone fills the budget — drop the document
 
 ## Input tensors (Core ML)
 
-| Name | Dtype | Shape (`-ane` variant) | Shape (`-cpugpu` variant) | Notes |
-|---|---|---|---|---|
-| `input_ids` | `Int32` | `(20, 1, 1, S)` | `(20, S)` | `S ∈ {128, 256, 512}` via `EnumeratedShapes`. Token IDs in `[0, 250001]`. |
-| `attention_mask` | `Int32` | `(20, 1, 1, S)` | `(20, S)` | `1` for real tokens, `0` for `<pad>`. |
+Both variants share the same input shape contract — they're the same architecture (the ANE-friendly port) converted with different `compute_units`. The `(1, 1)` middle dims are constant on the cpuAndGPU path (no overhead) and required by ANE's BC1S layout on the ANE path.
+
+| Name | Dtype | Shape | Notes |
+|---|---|---|---|
+| `input_ids` | `Int32` | `(20, 1, 1, S)` | `S ∈ {128, 256, 512}` via `EnumeratedShapes`. Token IDs in `[0, 250001]`. |
+| `attention_mask` | `Int32` | `(20, 1, 1, S)` | `1` for real tokens, `0` for `<pad>`. |
 
 There is **no `token_type_ids` input** — `type_vocab_size = 1`, so token-type embedding is constant and folded internally.
 
@@ -109,11 +111,41 @@ i.e. real tokens get positions starting at 2 (= `pad_token_id + 1`), pad tokens 
 Measured by `bench.py` on the maintainer's machine (recorded under `<variant>_provenance.json → machine`). 50 warmup + 100 timed iterations per cell. `per-pair p95 = p95 / batch`.
 
 <!-- BENCH:ane -->
-_(filled in by `bench.py --update-model-card MODEL_CARD.md`)_
+### Variant: `ane`
+
+| batch | seq | p50 (ms) | p95 (ms) | per-pair p95 (ms) |
+|------:|----:|---------:|---------:|------------------:|
+| 1 | 128 | 50.45 | 52.47 | 52.47 |
+| 4 | 128 | 50.34 | 51.63 | 12.91 |
+| 10 | 128 | 50.53 | 51.95 | 5.19 |
+| 20 | 128 | 51.24 | 52.46 | 2.62 |
+| 1 | 256 | 127.76 | 128.99 | 128.99 |
+| 4 | 256 | 128.50 | 129.16 | 32.29 |
+| 10 | 256 | 129.70 | 131.15 | 13.12 |
+| 20 | 256 | 129.46 | 130.74 | 6.54 |
+| 1 | 512 | 344.20 | 346.74 | 346.74 |
+| 4 | 512 | 343.03 | 346.89 | 86.72 |
+| 10 | 512 | 343.46 | 345.43 | 34.54 |
+| 20 | 512 | 346.01 | 348.64 | 17.43 |
 <!-- /BENCH:ane -->
 
 <!-- BENCH:cpugpu -->
-_(filled in by `bench.py --update-model-card MODEL_CARD.md`)_
+### Variant: `cpugpu`
+
+| batch | seq | p50 (ms) | p95 (ms) | per-pair p95 (ms) |
+|------:|----:|---------:|---------:|------------------:|
+| 1 | 128 | 122.79 | 123.10 | 123.10 |
+| 4 | 128 | 123.01 | 123.34 | 30.83 |
+| 10 | 128 | 123.13 | 123.46 | 12.35 |
+| 20 | 128 | 122.69 | 138.34 | 6.92 |
+| 1 | 256 | 242.07 | 242.87 | 242.87 |
+| 4 | 256 | 241.94 | 242.82 | 60.70 |
+| 10 | 256 | 242.10 | 243.17 | 24.32 |
+| 20 | 256 | 242.16 | 243.11 | 12.16 |
+| 1 | 512 | 503.81 | 504.98 | 504.98 |
+| 4 | 512 | 503.97 | 506.10 | 126.53 |
+| 10 | 512 | 503.95 | 504.87 | 50.49 |
+| 20 | 512 | 504.06 | 504.82 | 25.24 |
 <!-- /BENCH:cpugpu -->
 
 **Pass criterion (ANE variant):** `p95(batch=20, seq=256) < 200 ms` AND `per-pair p95 < 15 ms`. Matches Juice ADR 0006's reranker budget.

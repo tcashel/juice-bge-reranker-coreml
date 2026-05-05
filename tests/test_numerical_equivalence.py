@@ -132,7 +132,7 @@ def test_hf_to_ane_numerical_equivalence_on_fixed_pairs():
     from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
     hf_config = AutoConfig.from_pretrained(SOURCE_MODEL)
-    hf_model = AutoModelForSequenceClassification.from_pretrained(SOURCE_MODEL, torch_dtype=torch.float32).eval()
+    hf_model = AutoModelForSequenceClassification.from_pretrained(SOURCE_MODEL, dtype=torch.float32).eval()
     tokenizer = AutoTokenizer.from_pretrained(SOURCE_MODEL, use_fast=True)
 
     queries = [q for q, _ in FIXED_PAIRS]
