@@ -6,6 +6,10 @@ build/
 *.mlpackage/
 *.mlmodelc/
 
+# Swift Package Manager (examples/swift/)
+.build/
+.swiftpm/
+
 # python
 __pycache__/
 *.py[cod]

@@ -3,8 +3,9 @@ Verify that every op in a converted .mlpackage is dispatched to the Apple Neural
 
 Uses `coremltools.models.compute_plan.MLComputePlan` (added in coremltools 8.1, requires
 macOS 14.4+). Compiles the .mlpackage to .mlmodelc, walks the program function, and
-collects any op whose `preferred_compute_device` is not `NeuralEngine`. Exits non-zero
-on any violation so this can run as a CI gate.
+collects any op whose `preferred_compute_device` is not `MLNeuralEngineComputeDevice`.
+Constants (`const` ops) have no device usage and are correctly excluded from the count.
+Exits non-zero on any non-NE op among dispatched ops.
 
 Usage:
     pixi run python verify_ane.py build/bge-reranker-base-ane.mlpackage
@@ -25,15 +26,26 @@ import coremltools as ct
 from src.provenance import ANEResidencyReport
 
 
-def _device_name(usage) -> str:
-    if usage is None:
+def _device_name(device) -> str:
+    """Map a coremltools MLComputeDevice subclass to a short name."""
+    if device is None:
         return "Unknown"
-    device = usage.preferred_compute_device
-    return device if isinstance(device, str) else getattr(device, "name", str(device))
+    cls = type(device).__name__
+    if "NeuralEngine" in cls:
+        return "NeuralEngine"
+    if "CPU" in cls:
+        return "CPU"
+    if "GPU" in cls:
+        return "GPU"
+    return cls
 
 
-def verify(mlpackage_path: Path) -> ANEResidencyReport:
-    """Compile the .mlpackage and assert every op is ANE-resident."""
+def verify(mlpackage_path: Path) -> tuple[ANEResidencyReport, Counter[str]]:
+    """Compile the .mlpackage and assert every dispatched op is ANE-resident.
+
+    Returns the report plus a per-op-type breakdown of CPU dispatches (useful for
+    triage when violations exist).
+    """
     if not mlpackage_path.exists():
         raise FileNotFoundError(mlpackage_path)
 
@@ -54,20 +66,22 @@ def verify(mlpackage_path: Path) -> ANEResidencyReport:
     main_fn = program.functions["main"]
 
     counts: Counter[str] = Counter()
+    cpu_op_types: Counter[str] = Counter()
     violations: list[dict[str, str]] = []
 
     for op in main_fn.block.operations:
         usage = plan.get_compute_device_usage_for_mlprogram_operation(op)
-        device = _device_name(usage)
+        if usage is None:
+            # `const` ops and other compile-time values have no dispatch.
+            counts["Const"] += 1
+            continue
+        device = _device_name(usage.preferred_compute_device)
         counts[device] += 1
         if device != "NeuralEngine":
-            violations.append(
-                {
-                    "op_type": getattr(op, "operator_type", getattr(op, "type", "unknown")),
-                    "op_name": getattr(op, "name", ""),
-                    "device": device,
-                }
-            )
+            op_type = op.operator_name
+            if device == "CPU":
+                cpu_op_types[op_type] += 1
+            violations.append({"op_type": op_type, "device": device})
 
     total = sum(counts.values())
     report = ANEResidencyReport(
@@ -78,20 +92,22 @@ def verify(mlpackage_path: Path) -> ANEResidencyReport:
         gpu_ops=counts.get("GPU", 0),
         violations=violations,
     )
-    return report
+    return report, cpu_op_types
 
 
-def render_human_summary(report: ANEResidencyReport, mlpackage_path: Path) -> str:
+def render_human_summary(report: ANEResidencyReport, cpu_op_types: Counter[str], mlpackage_path: Path) -> str:
+    dispatched = report.ane_ops + report.cpu_ops + report.gpu_ops
+    consts = report.total_ops - dispatched
     lines = [
         f"ANE residency report: {mlpackage_path}",
-        f"  total ops: {report.total_ops}",
-        f"  ANE: {report.ane_ops}    CPU: {report.cpu_ops}    GPU: {report.gpu_ops}",
+        f"  total ops: {report.total_ops}  ({consts} const + {dispatched} dispatched)",
+        f"  dispatched: NE={report.ane_ops}  CPU={report.cpu_ops}  GPU={report.gpu_ops}",
         f"  verdict: {report.verdict.upper()}",
     ]
-    if report.violations:
-        lines.append("  violations:")
-        for v in report.violations:
-            lines.append(f"    - [{v['device']}] {v['op_type']} ({v['op_name']})")
+    if cpu_op_types:
+        lines.append("  CPU op type breakdown:")
+        for op_type, n in cpu_op_types.most_common():
+            lines.append(f"    {op_type} x {n}")
     return "\n".join(lines)
 
 
@@ -106,8 +122,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    report = verify(args.mlpackage)
-    print(render_human_summary(report, args.mlpackage))
+    report, cpu_op_types = verify(args.mlpackage)
+    print(render_human_summary(report, cpu_op_types, args.mlpackage))
 
     if args.json_out is not None:
         args.json_out.write_text(json.dumps(asdict(report), indent=2, sort_keys=True))
