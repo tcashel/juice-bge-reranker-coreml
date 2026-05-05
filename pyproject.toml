@@ -1,0 +1,40 @@
+[project]
+name = "juice-bge-reranker-coreml"
+version = "0.1.0"
+description = "Maintainer tool: convert BAAI/bge-reranker-base to an ANE-resident Core ML .mlpackage."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ty.environment]
+python-version = "3.13"
+extra-paths = ["."]
+
+[tool.ty.src]
+include = ["src", "vendor", "tests", "convert.py", "verify_ane.py", "bench.py", "publish.py"]
+
+[tool.ty.rules]
+unresolved-import = "error"
+
+[tool.ruff]
+line-length = 150
+target-version = "py313"
+extend-exclude = ["build", ".pixi"]
+
+[tool.ruff.lint]
+# E,F = pyflakes/pycodestyle, I = isort, UP = pyupgrade, B = bugbear, SIM = simplifications.
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# Vendored Apple code we keep verbatim — don't lint it.
+per-file-ignores = { "vendor/**" = ["E", "F", "B", "UP", "SIM"] }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "vendor*"]

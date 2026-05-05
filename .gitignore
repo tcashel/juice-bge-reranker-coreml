@@ -1,0 +1,30 @@
+# pixi
+.pixi/
+
+# build artifacts
+build/
+*.mlpackage/
+*.mlmodelc/
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ty_cache/
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# per-developer tool config (Claude Code, agent skills)
+.claude/
+.agents/
+
+# secrets
+.env
+.env.local
