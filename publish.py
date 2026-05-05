@@ -5,10 +5,16 @@ For each requested variant, stages a directory with the layout the Swift consume
 expects (a single `model.mlpackage`, tokenizer files at the root so
 `swift-transformers` finds `tokenizer.json` immediately, the MODEL_CARD.md as
 the repo's README.md, and the provenance sidecar), uploads it, then creates a
-git tag `v{X}-{variant}` on the resulting commit.
+Hugging Face git tag `v{X}-{variant}` on the resulting commit.
 
-Refuses to do anything destructive without `--confirm`. The plan explicitly
-requires explicit human acknowledgement before publishing.
+After both variants land, also creates an annotated **local** git tag `v{X}` on
+the source repo's HEAD so the published artifact traces back to a specific git
+commit. The tag is created locally only — push it explicitly with
+`git push origin v{X}` once you're satisfied. Refuses if the working tree is
+dirty or the tag already exists; pass `--no-git-tag` to skip this step.
+
+Refuses to do any HF push without `--confirm`. The plan explicitly requires
+explicit human acknowledgement before publishing.
 
 Usage:
     HUGGINGFACE_TOKEN=hf_xxx pixi run python publish.py --variant both --tag v0.1 --confirm
@@ -19,6 +25,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -51,6 +58,11 @@ def parse_args() -> argparse.Namespace:
         "--confirm",
         action="store_true",
         help="Required for any non-dry-run push. Without this, the script refuses.",
+    )
+    p.add_argument(
+        "--no-git-tag",
+        action="store_true",
+        help="Skip creating the local git tag after HF publish. Useful for partial republishes.",
     )
     return p.parse_args()
 
@@ -107,6 +119,60 @@ def stage_variant(build_dir: Path, variant: str, dest: Path) -> None:
             (dest / ".eval_results").mkdir(exist_ok=True)
             for f in eval_yamls:
                 shutil.copy2(f, dest / ".eval_results" / f.name)
+
+
+def _git(args: list[str]) -> str:
+    """Run a git command in the source repo and return stdout."""
+    result = subprocess.run(["git", *args], capture_output=True, text=True, cwd=ROOT)
+    if result.returncode != 0:
+        raise SystemExit(f"git {' '.join(args)} failed:\n{result.stderr.strip()}")
+    return result.stdout
+
+
+def check_git_state(tag: str) -> str:
+    """Verify the source repo is in a publishable state. Returns the HEAD SHA being tagged.
+
+    Refuses to proceed if:
+      - The working tree is dirty (published artifacts must trace to a clean commit).
+      - The local git tag already exists (would silently re-point on push).
+
+    Warns (but doesn't refuse) if HEAD is not on main — best practice is to publish
+    from a merged commit, but a maintainer may have a reason to publish from a branch.
+    """
+    dirty = _git(["status", "--porcelain"]).strip()
+    if dirty:
+        raise SystemExit(
+            "publish.py refuses: working tree is dirty. Commit or stash before publishing —\n"
+            "the published artifact must be traceable back to a clean git commit.\n\n"
+            f"Dirty paths:\n{dirty}\n\n"
+            "(Pass --no-git-tag to skip the git-tag step entirely if you really need to.)"
+        )
+    if _git(["tag", "--list", tag]).strip():
+        raise SystemExit(
+            f"publish.py refuses: local git tag {tag!r} already exists.\n"
+            f"  - Delete it first if you're re-publishing: git tag -d {tag}\n"
+            f"  - Or pass --no-git-tag to skip the git-tag step (HF tags are independent)."
+        )
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    if branch != "main":
+        print(f"[warning] HEAD is on branch {branch!r}, not 'main'. Best practice is to publish from main after merging the PR.")
+    head = _git(["rev-parse", "HEAD"]).strip()
+    return head
+
+
+def create_git_tag(tag: str, head: str, hf_tags: list[str], repo_id: str) -> None:
+    """Create an annotated local git tag on HEAD pointing at the published artifact set."""
+    msg_lines = [
+        f"Publish bge-reranker-base-coreml {tag}",
+        "",
+        f"Hugging Face: https://huggingface.co/{repo_id}",
+        "Tags pushed:",
+    ]
+    msg_lines.extend(f"  - {t}" for t in hf_tags)
+    msg = "\n".join(msg_lines)
+    _git(["tag", "-a", tag, "-m", msg])
+    print(f"\nCreated local git tag {tag} on {head[:12]}.")
+    print(f"To push it to GitHub: git push origin {tag}")
 
 
 def ensure_repo(api: HfApi, repo_id: str) -> None:
@@ -174,6 +240,17 @@ def main() -> int:
     print(f"variants: {list(targets)}   tag base: {args.tag}")
     print(f"build dir: {args.build_dir.resolve()}")
 
+    # Gate on git state before any HF work so a half-publish can't ship without a
+    # corresponding source-repo tag. Skip when --no-git-tag.
+    head_sha: str | None = None
+    if not args.no_git_tag:
+        if args.dry_run:
+            head_sha = _git(["rev-parse", "HEAD"]).strip()
+            print(f"[dry-run] would tag git HEAD ({head_sha[:12]}) as {args.tag} after HF push")
+        else:
+            head_sha = check_git_state(args.tag)
+            print(f"git HEAD: {head_sha[:12]}  (will tag as {args.tag} after HF push succeeds)")
+
     api = HfApi(token=token) if token else HfApi()
     if not args.dry_run:
         ensure_repo(api, args.repo_id)
@@ -195,6 +272,8 @@ def main() -> int:
         print("Published tags:")
         for t in pushed:
             print(f"  https://huggingface.co/{args.repo_id}/tree/{t}")
+        if not args.no_git_tag and head_sha is not None:
+            create_git_tag(args.tag, head_sha, pushed, args.repo_id)
     return 0
 
 
