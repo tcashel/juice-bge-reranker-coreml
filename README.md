@@ -67,7 +67,7 @@ juice-bge-reranker-coreml/
 
 ## Architecture correction (open in Juice)
 
-ADR 0006 in the sibling Juice repo (`/Users/tcashel/repositories/juice/docs/adr/0006-search-models.md`) describes this model as a "BERT cross-encoder" with `[CLS] query [SEP] doc [SEP]` framing. **It is XLM-RoBERTa**, not BERT. The tokenizer is SentencePiece-Unigram (not WordPiece), special tokens are `<s>`/`</s>`/`<pad>` (not `[CLS]`/`[SEP]`/`[PAD]`), the paired-input template is `<s> query </s></s> doc </s>` (note the doubled separator). The encoder *geometry* is BERT-like, so Apple's primitives still apply, but the integration-contract details differ. **Patch ADR 0006 in a follow-up Juice PR.** This repo's `MODEL_CARD.md` documents the correct contract.
+ADR 0006 in the sibling Juice repo describes this model as a "BERT cross-encoder" with `[CLS] query [SEP] doc [SEP]` framing. **It is XLM-RoBERTa**, not BERT. The tokenizer is SentencePiece-Unigram (not WordPiece), special tokens are `<s>`/`</s>`/`<pad>` (not `[CLS]`/`[SEP]`/`[PAD]`), the paired-input template is `<s> query </s></s> doc </s>` (note the doubled separator). The encoder *geometry* is BERT-like, so Apple's primitives still apply, but the integration-contract details differ. **Patch ADR 0006 in a follow-up Juice PR.** This repo's `MODEL_CARD.md` documents the correct contract.
 
 ## What this repo does NOT do
 
