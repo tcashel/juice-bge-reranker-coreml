@@ -2,7 +2,7 @@
 
 Maintainer-side conversion tool: turn [`BAAI/bge-reranker-base`](https://huggingface.co/BAAI/bge-reranker-base) (PyTorch) into an Apple-Neural-Engine-resident Core ML `.mlpackage` and publish it to Hugging Face Hub.
 
-> This is **not** a runtime. It does not run on a user's machine. The Juice macOS app downloads the published artifact at first launch via `swift-transformers`. The Juice repo's `CLAUDE.md` forbids bundling Python in the app payload, which is why this conversion lives here.
+> This is **not** a runtime. It does not run on a user's machine. The Juice macOS app downloads the published artifact at first launch via `swift-transformers`. The consumer cannot bundle Python in its app payload, which is why this conversion lives here as maintainer-side infra.
 
 ## Outputs per release
 
@@ -13,7 +13,7 @@ Two `.mlpackage` variants are published to **`tcashel/bge-reranker-base-coreml`*
 | `v{X}-ane` | `cpuAndNeuralEngine` | Headline build. Every op verified ANE-resident. |
 | `v{X}-cpugpu` | `cpuAndGPU` | Known-good fallback if the ANE build fails to load. |
 
-The Juice Swift app pins by tag and embeds it in its `rerank_cache.model_id` so rotating the tag invalidates the cache. See `MODEL_CARD.md` for the full integration contract — that file is the consumer-side spec.
+The Juice Swift app pins by tag and embeds it in any per-model cache key, so rotating the tag invalidates downstream caches. See `MODEL_CARD.md` for the full integration contract — that file is the consumer-side spec.
 
 ## Stack
 
@@ -65,9 +65,9 @@ juice-bge-reranker-coreml/
     └─ test_numerical_equivalence.py
 ```
 
-## Architecture correction (open in Juice)
+## Architecture note: XLM-RoBERTa, not BERT
 
-ADR 0006 in the sibling Juice repo (`/Users/tcashel/repositories/juice/docs/adr/0006-search-models.md`) describes this model as a "BERT cross-encoder" with `[CLS] query [SEP] doc [SEP]` framing. **It is XLM-RoBERTa**, not BERT. The tokenizer is SentencePiece-Unigram (not WordPiece), special tokens are `<s>`/`</s>`/`<pad>` (not `[CLS]`/`[SEP]`/`[PAD]`), the paired-input template is `<s> query </s></s> doc </s>` (note the doubled separator). The encoder *geometry* is BERT-like, so Apple's primitives still apply, but the integration-contract details differ. **Patch ADR 0006 in a follow-up Juice PR.** This repo's `MODEL_CARD.md` documents the correct contract.
+The encoder geometry is BERT-like (12L / 768H / 12 heads / GELU / post-LN), so Apple's reference primitives lower cleanly to ANE. But the upstream `config.json` declares `model_type: xlm-roberta`, and the integration-contract details differ from a vanilla BERT cross-encoder: the tokenizer is SentencePiece-Unigram (not WordPiece), special tokens are `<s>`/`</s>`/`<pad>` (not `[CLS]`/`[SEP]`/`[PAD]`), and the paired-input template is `<s> query </s></s> doc </s>` (note the doubled separator). Don't pattern-match on the BERT-like geometry and reach for `[CLS]`/`[SEP]`. `MODEL_CARD.md` is the authoritative contract.
 
 ## What this repo does NOT do
 
