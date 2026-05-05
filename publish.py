@@ -30,6 +30,7 @@ DEFAULT_REPO_ID = "tcashel/bge-reranker-base-coreml"
 DEFAULT_BUILD_DIR = Path("build")
 ROOT = Path(__file__).resolve().parent
 MODEL_CARD = ROOT / "MODEL_CARD.md"
+EVAL_RESULTS_DIR = ROOT / ".eval_results"
 
 VARIANTS = ("ane", "cpugpu")
 
@@ -74,6 +75,7 @@ def stage_variant(build_dir: Path, variant: str, dest: Path) -> None:
       special_tokens_map.json
       sentencepiece.bpe.model
       provenance.json            <- {variant}_provenance.json
+      .eval_results/*.yaml       <- per-task quality eval results (HF model-index format)
     """
     artifact = variant_artifact(build_dir, variant)
     if not artifact.exists():
@@ -97,6 +99,14 @@ def stage_variant(build_dir: Path, variant: str, dest: Path) -> None:
     # Provenance + readme.
     shutil.copy2(provenance, dest / "provenance.json")
     shutil.copy2(MODEL_CARD, dest / "README.md")
+    # Quality eval results (HF reads .eval_results/*.yaml at the repo root). Same numbers
+    # apply to both variants — FP16 weights are bit-identical between -ane and -cpugpu.
+    if EVAL_RESULTS_DIR.is_dir():
+        eval_yamls = sorted(EVAL_RESULTS_DIR.glob("*.yaml"))
+        if eval_yamls:
+            (dest / ".eval_results").mkdir(exist_ok=True)
+            for f in eval_yamls:
+                shutil.copy2(f, dest / ".eval_results" / f.name)
 
 
 def ensure_repo(api: HfApi, repo_id: str) -> None:

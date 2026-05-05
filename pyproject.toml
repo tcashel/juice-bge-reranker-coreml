@@ -38,6 +38,20 @@ lint = "ruff check ."
 fmt = "ruff format ."
 fmt-check = "ruff format --check ."
 
+# Opt-in eval feature. Mounted as a separate environment so `pixi install` (the
+# default env used by convert/verify/bench/publish) stays lean — the heavy
+# `datasets` dep is only fetched when `pixi install -e eval` is run.
+[tool.pixi.feature.eval.pypi-dependencies]
+datasets = ">=2.20"
+
+[tool.pixi.feature.eval.tasks]
+eval = "python eval/quality_regression.py"
+eval-full = "python eval/quality_regression.py --tasks all-reranking"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+eval = { features = ["eval"], solve-group = "default" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
@@ -47,6 +61,9 @@ python-version = "3.13"
 extra-paths = ["."]
 
 [tool.ty.src]
+# eval/ is intentionally omitted: it imports `datasets`, which only lives in the
+# opt-in eval pixi environment, so type-checking it from the default env would
+# spuriously fail. ruff still lints/formats it via [tool.ruff].
 include = ["src", "vendor", "tests", "convert.py", "verify_ane.py", "bench.py", "publish.py"]
 
 [tool.ty.rules]

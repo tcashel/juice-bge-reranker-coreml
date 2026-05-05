@@ -9,7 +9,28 @@ tags:
   - core-ml
   - apple-silicon
   - ane
+  - mteb
 base_model: BAAI/bge-reranker-base
+# MODEL_INDEX:auto-stamped — do not edit by hand
+model-index:
+  - name: bge-reranker-base-coreml
+    results:
+      - task:
+          type: text-ranking
+          name: Reranking
+        dataset:
+          type: mteb/scidocs-reranking
+          name: SciDocs Reranking
+          split: test
+          revision: <not pinned>
+        metrics:
+          - type: ndcg_at_10
+            name: nDCG@10
+            value: 0.7415
+          - type: map
+            name: MAP
+            value: 0.6743
+# /MODEL_INDEX
 ---
 
 # bge-reranker-base — Core ML (.mlpackage) for Apple Silicon
@@ -229,6 +250,24 @@ Measured by `bench.py` on the maintainer's machine (recorded under `<variant>_pr
 <!-- /BENCH:cpugpu -->
 
 **Pass criterion (ANE variant):** `p95(batch=20, seq=256) < 200 ms` AND `per-pair p95 < 15 ms`. Matches Juice ADR 0006's reranker budget.
+
+## Quality regression eval
+
+Validates that the FP32 → FP16 + Core ML conversion preserved upstream behavior. Scored by `eval/quality_regression.py` against the [MTEB Reranking](https://huggingface.co/datasets?other=mteb&task_categories=task_categories%3Asentence-similarity) suite — the same benchmark family `BAAI/bge-reranker-base` is evaluated on. Pass criterion: `|Δ nDCG@10| < 0.005` per task vs the FP32 reference. Variant equivalence: scores apply to both `-ane` and `-cpugpu` (the FP16 weights inside each `.mlpackage` are bit-identical; only `compute_units` differs at load).
+
+<!-- EVAL:reranking -->
+### MTEB Reranking — FP32 reference vs Core ML FP16
+
+_Variant equivalence: FP16 weights are bit-identical between `-ane` and `-cpugpu`; both inherit these numbers._
+
+| Task | n queries | FP32 nDCG@10 | Core ML nDCG@10 | Δ nDCG@10 | FP32 MAP | Core ML MAP |
+|---|---:|---:|---:|---:|---:|---:|
+| scidocs-reranking | 3978 | 0.7410 | 0.7415 | +0.0005 | 0.6742 | 0.6743 |
+
+**Pass criterion:** `|Δ nDCG@10| < 0.005` per task. FP32 baseline is `BAAI/bge-reranker-base` loaded with `attn_implementation="eager"`.
+
+_Note on absolute scale:_ the nDCG@10 reported here (~0.74) reflects macro nDCG@10 over the test split's pre-ranked candidate pool (1 positive + ~29 negatives per query), which is structurally different from the full-corpus eval setup the BGE paper reports (~0.84). Δ vs the FP32 reference on the same setup is the meaningful regression signal; the absolute number is not directly comparable to the upstream paper.
+<!-- /EVAL:reranking -->
 
 ## Failure modes the Swift consumer must handle
 
