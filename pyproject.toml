@@ -1,10 +1,42 @@
 [project]
 name = "juice-bge-reranker-coreml"
 version = "0.1.0"
-description = "Maintainer tool: convert BAAI/bge-reranker-base to an ANE-resident Core ML .mlpackage."
+description = "Maintainer tool: convert BAAI/bge-reranker-base to an ANE-resident Core ML .mlpackage and publish to Hugging Face Hub."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { text = "MIT" }
+authors = [{ name = "Tripp Cashel", email = "tcashel@gmail.com" }]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.dependencies]
+python = "3.13.*"
+pip = ">=24"
+
+[tool.pixi.pypi-dependencies]
+torch = ">=2.2"
+transformers = ">=4.40"
+coremltools = ">=8.1"
+huggingface-hub = ">=0.24"
+sentencepiece = ">=0.2"
+numpy = "<2.2"
+protobuf = ">=3.20"
+pytest = ">=8"
+ty = ">=0.0.1a"
+ruff = ">=0.6"
+
+[tool.pixi.tasks]
+convert = "python convert.py"
+verify-ane = "python verify_ane.py"
+bench = "python bench.py"
+publish = "python publish.py"
+test = "pytest tests/ -v"
+typecheck = "ty check"
+lint = "ruff check ."
+fmt = "ruff format ."
+fmt-check = "ruff format --check ."
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -26,15 +58,5 @@ target-version = "py313"
 extend-exclude = ["build", ".pixi"]
 
 [tool.ruff.lint]
-# E,F = pyflakes/pycodestyle, I = isort, UP = pyupgrade, B = bugbear, SIM = simplifications.
 select = ["E", "F", "I", "UP", "B", "SIM"]
-# Vendored Apple code we keep verbatim — don't lint it.
 per-file-ignores = { "vendor/**" = ["E", "F", "B", "UP", "SIM"] }
-
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*", "vendor*"]
