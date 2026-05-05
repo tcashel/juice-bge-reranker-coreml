@@ -28,7 +28,8 @@ from pathlib import Path
 import coremltools as ct
 import numpy as np
 import torch
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils import EntryNotFoundError
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
 from src.ane_xlm_roberta import (
@@ -81,16 +82,30 @@ def resolve_revision(repo_id: str, revision: str | None) -> str:
     return info.sha
 
 
-def save_tokenizer(tokenizer, dst: Path) -> None:
-    """Save tokenizer files in the layout swift-transformers consumes (tokenizer.json + sentencepiece.bpe.model)."""
+def save_tokenizer(tokenizer, dst: Path, source_model: str, source_revision: str) -> None:
+    """Save tokenizer files mirroring the upstream layout.
+
+    `tokenizer.save_pretrained` on a transformers 5.x fast tokenizer writes only
+    `tokenizer.json` + `tokenizer_config.json` (the SPM model is bundled inside
+    tokenizer.json). The Swift consumer's fast path is happy with that, but the
+    upstream BAAI repo also ships `sentencepiece.bpe.model` and
+    `special_tokens_map.json` as separate files for slow-tokenizer / belt-and-
+    braces compatibility. Pull those from the source repo at the pinned revision
+    so the published artifact matches the upstream file set.
+    """
     if dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
     tokenizer.save_pretrained(dst)
-    # save_pretrained should produce tokenizer.json automatically for fast tokenizers;
-    # surface a clear error if it didn't.
     if not (dst / "tokenizer.json").exists():
         raise RuntimeError(f"Tokenizer at {dst} is missing tokenizer.json — swift-transformers needs the fast format. Re-fetch with `use_fast=True`.")
+    for upstream_file in ("sentencepiece.bpe.model", "special_tokens_map.json"):
+        try:
+            cached = hf_hub_download(repo_id=source_model, filename=upstream_file, revision=source_revision)
+        except EntryNotFoundError:
+            print(f"      [warning] {upstream_file} not present in {source_model}@{source_revision[:12]}; skipping")
+            continue
+        shutil.copy2(cached, dst / upstream_file)
 
 
 def build_ane_model(hf_model, hf_config) -> ANEXLMRobertaForSequenceClassification:
@@ -183,7 +198,7 @@ def main() -> int:
     hf_model = AutoModelForSequenceClassification.from_pretrained(args.source_model, revision=sha, dtype=torch.float32, attn_implementation="eager")
     hf_model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.source_model, revision=sha, use_fast=True)
-    save_tokenizer(tokenizer, output_dir / "tokenizer")
+    save_tokenizer(tokenizer, output_dir / "tokenizer", source_model=args.source_model, source_revision=sha)
     print(f"      tokenizer saved -> {output_dir / 'tokenizer'}")
 
     seq_lengths = tuple(s for s in DEFAULT_SEQ_LENGTHS if s <= args.max_seq_len)
