@@ -126,7 +126,7 @@ pixi run python examples/predict.py --source hub --tag v0.1-ane
 
 | Tag | Compute units | Intended use |
 |---|---|---|
-| `v{X}-ane` | `cpuAndNeuralEngine` | Headline build. The 12-layer encoder backbone (~924 ops: einsum, conv, softmax, layer_norm, gelu, transpose, residual add/mul) runs on the Apple Neural Engine. ~31 boundary ops (embedding gather over the 250k vocab, position-id arithmetic, mask construction, casts) dispatch to CPU; this is the Pareto frontier for XLM-RoBERTa-class models with very large vocabularies. Verified by `verify_ane.py`. M-series Macs only. |
+| `v{X}-ane` | `cpuAndNeuralEngine` | Headline build. The 12-layer encoder backbone (924 ops: einsum, conv, softmax, layer_norm, gelu, transpose, residual add/mul) runs on the Apple Neural Engine. 31 boundary ops (embedding gather over the 250k vocab, position-id arithmetic, mask construction, casts) dispatch to CPU; this is the Pareto frontier for XLM-RoBERTa-class models with very large vocabularies. `verify_ane.py` enforces this exact 924/31 residency fingerprint as a regression gate — any drift fails. M-series Macs only. |
 | `v{X}-cpugpu` | `cpuAndGPU` | Known-good fallback — the same ANE port converted with `compute_units=CPU_AND_GPU`. Used by Swift if the `-ane` build fails to load (e.g. driver or macOS version mismatch). |
 
 The Swift caller pins the tag in `Hub.snapshot(repo: "tcashel/bge-reranker-base-coreml", revision: "<tag>")` and embeds the same `<tag>` in any consumer-side cache key tied to model identity — rotating the tag invalidates downstream caches.
